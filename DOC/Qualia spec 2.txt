@@ -1,0 +1,58 @@
+
+
+[DOC] [THÉORIE]
+Document Complémentaire : Le Simulateur de Données et les Contrôles Interactifs
+1. Le Rôle du Moteur Lissajous : Un Simulateur de Données Temporaire
+Le "moteur Lissajous" est une composante logicielle cruciale mais temporaire. Son unique but est de servir de simulateur de données pour le développement et le test du moteur de rendu. Il n'est pas une fonctionnalité du produit final.
+	•	Pourquoi est-il nécessaire ? Le développement de la logique de réception SPI esclave est complexe et nécessite un "maître" SPI fonctionnel pour générer des données. Pour découpler les problèmes, le moteur Lissajous nous fournit un flux de données parfaitement prévisible, contrôlable et constant, nous permettant de nous concentrer exclusivement sur l'optimisation du rendu (performance, lissage, rémanence) sans avoir à nous soucier de la couche de communication.
+	•	Simulation du Contrat SPI : Le simulateur a été conçu pour imiter à la perfection le "contrat de données" que nous attendons du maître SPI :
+	◦	Il génère des "waypoints" (des PlotterPacket) à une fréquence de 1000 Hz.
+	◦	Il les envoie de manière asynchrone à la tâche de rendu via le même mécanisme de file d'attente (points_queue) qui sera utilisé par le récepteur SPI.
+	◦	Sa "vitesse" (g_lissajous_speed) simule la distance spatiale entre les waypoints, tout comme le ferait un signal d'entrée rapide ou lent.
+	•	Vocation à Disparaître : Une fois la communication SPI validée et le projet intégré avec son processeur maître réel, le code du moteur Lissajous (lissajous_task) a vocation à être complètement supprimé du projet final pour ne laisser que la spi_listener_task comme unique source de données.
+
+2. Implémentation du Simulateur Lissajous
+	•	Fichiers d'Implémentation : Toute la logique du simulateur est encapsulée dans le module de source de données.
+	◦	Déclaration : La tâche est créée dans DataSource.cpp.
+	◦	Contrôle : La variable qui contrôle sa vitesse (g_lissajous_speed) est également définie dans DataSource.cpp.
+	•	Dépendances :
+	◦	Il dépend de la file d'attente points_queue (définie dans RenderEngine.cpp) pour envoyer ses données.
+	◦	Il dépend de la variable globale g_lissajous_speed (contrôlée par la control_task dans RenderEngine.cpp).
+	•	Paramètres et Connexions :
+	◦	Le simulateur n'a aucune connexion matérielle. Il s'agit d'un processus purement logiciel.
+	◦	Ses paramètres (fréquences a et b, phase) sont codés en dur dans la fonction lissajous_task (DataSource.cpp) car ils n'ont qu'un but de test.
+
+3. Le Mécanisme de Bascule SPI / Lissajous
+Pour permettre des tests fluides, un mécanisme de bascule à la volée a été implémenté.
+	•	Le Contrôleur : La logique de la bascule est gérée par la control_task, qui se trouve dans RenderEngine.cpp.
+	•	L'Entrée Utilisateur : La bascule est déclenchée par une pression sur le bouton physique "UP" de la carte Qualia. Ce bouton est connecté à l'extenseur d'E/S I2C, qui est lu par la control_task.
+	•	Le Mécanisme (FreeRTOS) : La control_task utilise les fonctions de contrôle de tâches de FreeRTOS pour orchestrer la bascule. Au démarrage, les deux tâches (lissajous_task et spi_listener_task) sont créées, mais la tâche SPI est immédiatement suspendue.
+	◦	Lors d'une pression sur "UP" :
+	1	La control_task vérifie le mode actuel.
+	2	Elle suspend la tâche actuellement active (vTaskSuspend).
+	3	Elle réveille la tâche inactive (vTaskResume).
+	4	Elle met à jour une variable d'état interne pour se souvenir du mode actif.
+	◦	Avantage : Ce mécanisme garantit que la tâche inactive ne consomme absolument aucun cycle CPU, assurant que la source de données active dispose de toutes les ressources nécessaires.
+
+4. Synthèse des Fonctions du Port Série
+Le port série est utilisé exclusivement comme un outil de débogage et de monitoring. Il n'est pas essentiel au fonctionnement du rendu.
+	•	Configuration Initiale :
+	◦	Lieu : QualiaS3_Final.ino (dans la fonction setup()).
+	◦	Fonction : Serial.begin(9600);
+	◦	Rôle : Initialise la communication à une vitesse de 9600 bauds.
+	•	Affichage du Statut au Démarrage et lors de la Bascule :
+	◦	Lieu : QualiaS3_Final.ino (dans setup()) et RenderEngine.cpp (dans la control_task).
+	◦	Fonction : Serial.println("...");
+	◦	Rôle : Affiche des messages textuels pour informer l'utilisateur de l'état du système (ex: "Mode: SPI Actif").
+	•	Contrôle de la Vitesse du Simulateur :
+	◦	Lieu : RenderEngine.cpp (dans la control_task).
+	◦	Fonction : Serial.available() et Serial.read().
+	◦	Rôle : La control_task vérifie en permanence si des caractères ont été envoyés via le moniteur série. Si un 'p' est reçu, elle augmente la variable g_lissajous_speed. Si un 'm' est reçu, elle la diminue.
+	•	Affichage des FPS (Monitoring de Performance) :
+	◦	Lieu : RenderEngine.cpp (à la fin de la boucle de la render_task).
+	◦	Fonction : Serial.printf("FPS: %.0f\n", ...);
+	◦	Rôle : Toutes les 500 millisecondes, la render_task calcule le nombre d'images qu'elle a dessinées et l'affiche sur le port série. C'est notre principal outil pour mesurer la performance du moteur de rendu.
+	•	Le "BIP" SPI (Feedback de Connexion) :
+	◦	Lieu : RenderEngine.cpp (dans la control_task).
+	◦	Fonction : Serial.println("[SPI BIP] Connexion active.");
+	◦	Rôle : C'est notre "LED virtuelle". Une fois par seconde, la control_task vérifie si des données SPI ont été reçues récemment (via le timestamp g_last_spi_packet_time). Si c'est le cas, elle imprime ce message pour confirmer que la communication maître-esclave est fonctionnelle.

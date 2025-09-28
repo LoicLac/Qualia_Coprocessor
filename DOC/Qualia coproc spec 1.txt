@@ -1,0 +1,70 @@
+
+[DOC] [THÉORIE]
+Synthèse Technique du Projet : Qualia GFX Processor
+1. Rôle et But du Code
+Le code développé transforme la carte Adafruit Qualia ESP32-S3 en un coprocesseur graphique dédié haute performance. Son unique mission est de recevoir un flux de coordonnées 2D d'un processeur maître et de les restituer à l'écran avec une fluidité et une esthétique spécifiques.
+Ce n'est pas une application autonome, mais un composant esclave dans un système plus large. Son but est de décharger complètement le processeur maître de la tâche complexe et intensive du rendu graphique, lui permettant de se consacrer à ses propres calculs (par exemple, la synthèse audio ou le traitement de signaux).
+L'objectif final est d'atteindre une "fluidité absolue", c'est-à-dire la cadence de rafraîchissement la plus élevée possible, tout en recréant l'esthétique d'un oscilloscope vectoriel analogique, caractérisé par une trace lumineuse, parfaitement lisse, et une rémanence ("phosphor burn") qui s'estompe de manière organique.
+
+2. Contraintes Impératives du Cahier des Charges
+Toutes les décisions architecturales ont été dictées par un ensemble de contraintes non négociables :
+	•	Nature de Coprocesseur : Le logiciel est conçu pour une tâche unique. Toutes les ressources matérielles disponibles de la Qualia S3 (les deux cœurs du CPU, les 8 Mo de PSRAM) doivent être dépensées sans compromis pour atteindre les objectifs de performance et de qualité. L'économie de ressources n'est pas un objectif.
+	•	Performance (Fluidité Absolue) : L'objectif n'est pas de viser une cadence fixe (ex: 60 FPS), mais d'exécuter la boucle de rendu aussi rapidement que possible pour minimiser la latence entre la réception d'une donnée et son affichage. La performance est mesurée en images par seconde (FPS) et doit être maximisée.
+	•	Qualité du Tracé (Lissage) : La trace affichée doit être exempte de tout artefact numérique tel que l'aliasing géométrique ("effets d'escalier") ou les angles vifs. Le mouvement doit être perçu comme une courbe continue et fluide, même lorsque les points de données reçus sont très espacés.
+	•	Absence d'Artefacts de Rendu : Le système de rémanence ne doit générer aucun "pixel orphelin" ou autre bug visuel. Chaque pixel dessiné doit avoir un cycle de vie contrôlé et déterministe.
+	•	Découplage et Architecture : Le système doit utiliser une architecture multi-tâches (FreeRTOS) pour découpler complètement la réception des données (asynchrone et à haute fréquence) du processus de rendu (intensif en calculs). Le moteur de rendu doit être agnostique à la source des données (simulateur Lissajous ou SPI).
+
+4. La Solution de Rendu : L'Architecture "Framebuffer d'État"
+Après avoir exploré et rejeté plusieurs architectures, la solution finale a été choisie car elle est la seule à répondre à toutes les contraintes sans compromis.
+	•	Pourquoi les autres approches ont échoué :
+	◦	Fondu Global du Framebuffer : Conceptuellement simple, mais catastrophique en performance. Le traitement de plus de 500 000 pixels à chaque trame sature la bande passante de la PSRAM.
+	◦	Gestion par Points Actifs ("Spying Driver") : Logiquement complexe, cette approche a créé des bugs de rendu subtils ("pixels orphelins", conflits de zoom) et s'est avérée étonnamment lente en raison du très grand nombre d'opérations de dessin individuelles nécessaires pour la rémanence.
+	•	Pourquoi le "Framebuffer d'État" a été choisi :
+	◦	Le Principe : Cette architecture sacrifie une quantité importante mais acceptable de mémoire PSRAM pour obtenir une simplicité logique et une performance de rendu maximales.
+	◦	L'Implémentation : Elle utilise deux buffers de la taille de l'écran (720x720) :
+	1	Le Framebuffer Graphique (1 Mo) : Contient les données de couleur (uint16_t) lues par le contrôleur d'affichage.
+	2	Le Framebuffer d'État ou life_buffer (0.5 Mo) : Un buffer parallèle qui stocke la "vie" (uint8_t) de chaque pixel.
+	◦	Les Avantages :
+	▪	Performance de Superposition Instantanée : Pour gérer la superposition, il suffit d'écrire la valeur de vie maximale (255) dans le life_buffer aux coordonnées du nouveau pixel. C'est une opération en temps constant (O(1)), la plus rapide possible.
+	▪	Absence d'Artefacts : Comme chaque pixel de l'écran a son propre état de "vie" mémorisé, les "pixels orphelins" sont structurellement impossibles.
+	▪	Performance de Fondu Prévisible : La charge de travail pour la rémanence est constante (le parcours du life_buffer), indépendante de la complexité de la trace. L'optimisation par "fondu entrelacé" répartit cette charge dans le temps pour maximiser les FPS.
+
+5. Description Complète du Pipeline d'Exécution
+Le système est orchestré par FreeRTOS à travers trois tâches spécialisées.
+Tâche de Contrôle (control_task) - Cœur 0, Basse Priorité
+	•	Cadence : ~50 Hz (toutes les 20 ms).
+	•	Rôle : Gérer les entrées utilisateur "lentes".
+	•	Pipeline :
+	1	Lit l'état des potentiomètres sur A0 (Zoom) et A1 (Rémanence).
+	2	Applique une bande morte (deadband) et un lissage pour stabiliser les lectures.
+	3	Mappe les valeurs lissées sur les plages de contrôle définies (0.5x-2.0x pour le zoom, 1-5000ms pour la rémanence).
+	4	Met à jour les variables globales volatile correspondantes (g_zoom_factor, g_remanence_duration_ms).
+	5	Si une valeur a changé, positionne un "drapeau" (g_zoom_changed, g_remanence_changed) pour informer la tâche de rendu qu'un recalcul est nécessaire.
+	6	Lit le port série pour les commandes de vitesse ('p'/'m').
+	7	Gère la logique de bascule (bouton "UP") en suspendant/reprenant les tâches de source de données.
+Tâche de Données (data_generator_task ou spi_listener_task) - Cœur 0, Haute Priorité
+	•	Cadence : 1000 Hz.
+	•	Rôle : Produire les PlotterPacket (waypoints).
+	•	Pipeline (Mode Lissajous) :
+	1	S'exécute toutes les 1 ms.
+	2	Lit la variable globale g_lissajous_speed.
+	3	Calcule le prochain point sur la courbe.
+	4	Envoie le PlotterPacket résultant à la points_queue.
+Tâche de Rendu (render_task) - Cœur 1, Priorité Normale
+	•	Cadence : Maximale (débridée).
+	•	Rôle : Afficher la trace et gérer la rémanence.
+	•	Pipeline par Image :
+	1	Gestion des Changements : Vérifie les drapeaux g_zoom_changed et g_remanence_changed. Si nécessaire, effectue un "hard reset" visuel ou recalcule le facteur de décroissance.
+	2	Fondu Phosphore (La charge principale) :
+	▪	Identifie la "tranche" de l'écran à traiter pour cette image (0, 1, 2, ou 3).
+	▪	Parcourt uniquement les pixels de cette tranche qui sont à l'intérieur du masque circulaire pré-calculé.
+	▪	Pour chaque pixel, lit sa life depuis le life_buffer.
+	▪	Si life > 0, décrémente la life, et met à jour le pixel correspondant dans le framebuffer graphique avec la couleur de la palette.
+	3	Traitement des Nouveaux Waypoints :
+	▪	Vide la points_queue de tous les waypoints accumulés depuis la dernière image.
+	▪	Pour chaque nouveau waypoint reçu :a. Applique le g_zoom_factor pour obtenir les coordonnées écran finales.b. L'ajoute à un buffer de 4 points qui sert de "fenêtre glissante".c. Si la fenêtre contient 4 points, appelle la fonction de lissage.
+	4	Lissage et Dessin :
+	▪	La fonction draw_catmull_rom_segment est appelée.
+	▪	Elle calcule ~20 points interpolés sur une courbe Spline lisse entre les deux waypoints centraux.
+	▪	Pour chaque point interpolé (sx, sy) :i. Met à jour le life_buffer à l'index [sy][sx] avec la valeur 255 (pleine intensité).ii. Dessine le pixel (sx, sy) dans le framebuffer graphique avec la couleur vive.
+	5	Monitoring : Met à jour et affiche le compteur de FPS toutes les 500 ms.

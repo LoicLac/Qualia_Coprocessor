@@ -1,0 +1,89 @@
+
+
+[DOC] [THÉORIE]
+Dossier Technique : Matériel et Environnement de Développement
+Projet : Qualia GFX Processor V2.0
+1. Synthèse du Système
+Ce document spécifie l'ensemble du matériel et des logiciels requis pour le développement et l'exécution du projet "Qualia GFX Processor". Le système est composé d'un coprocesseur graphique (la carte Adafruit Qualia S3) pilotant un écran RGB TTL haute résolution. L'objectif est de décharger un processeur maître de toutes les tâches de rendu, en fournissant une interface de commande simple via un bus SPI. L'architecture logicielle est basée sur le système d'exploitation temps réel FreeRTOS pour garantir une performance et une réactivité maximales.
+
+2. Nomenclature Matérielle (Bill of Materials)
+Rôle
+Composant
+Modèle/Spécification
+Quantité
+Notes
+Processeur
+Carte de développement
+Adafruit Qualia ESP32-S3 for RGB-666 Displays
+1
+Cœur du coprocesseur graphique.
+Affichage
+Écran LCD Circulaire
+Adafruit 4.0" 720x720 Round TFT Display
+1
+Modèle HD40015C40 avec contrôleur NV3052C.
+Contrôle (Zoom)
+Potentiomètre
+10kΩ Linéaire
+1
+Connecté à A0.
+Contrôle (Rémanence)
+Potentiomètre
+10kΩ Linéaire
+1
+Connecté à A1.
+Câblage (Prog.)
+Câble USB
+USB-A/C vers USB-C
+1
+Doit impérativement supporter le transfert de données.
+Câblage (Proto.)
+Fils de connexion
+Fils Dupont M/M
+6
+Pour les potentiomètres.
+
+3. Spécifications Détaillées des Composants Clés
+La Qualia S3 n'est pas une simple carte de développement ; elle est spécifiquement conçue comme un pilote pour écrans RGB TTL.
+	•	Microcontrôleur : Espressif ESP32-S3.
+	◦	Architecture : Double cœur Xtensa LX7 cadencé à 240 MHz. Cette dualité est fondamentale pour notre projet, permettant d'isoler la réception des données (Cœur 0) du rendu graphique (Cœur 1) via FreeRTOS.
+	◦	Connectivité : USB-C natif, utilisé pour la programmation et la communication série de débogage.
+	•	Mémoire (La Spécificité la Plus Importante) :
+	◦	Flash : 16 Mo. Utilisée pour stocker le programme.
+	◦	PSRAM : 8 Mo (Octal SPI). C'est la ressource la plus critique du projet. Elle est indispensable pour stocker les deux buffers de la taille de l'écran qui forment le cœur de notre moteur de rendu :
+	1	Le Framebuffer Graphique : 720 * 720 * 2 octets ≈ 1 Mo.
+	2	Le Framebuffer d'État (life_buffer) : 720 * 720 * 1 octet ≈ 0.5 Mo.Sans cette PSRAM externe et rapide, le projet serait irréalisable.
+	•	Périphériques Spécifiques au Rendu :
+	◦	Contrôleur LCD : Le périphérique matériel intégré à l'ESP32-S3 qui génère les signaux RGB TTL parallèles et gère le balayage DMA du framebuffer.
+	◦	Extenseur d'E/S (PCA9554A) : Un circuit sur le bus I2C qui fournit des broches GPIO supplémentaires.
+	▪	Rôle dans le projet : Il est utilisé pour envoyer la séquence de commandes d'initialisation à l'écran via un bus série (SPI) émulé, car les broches natives de l'ESP32-S3 sont toutes dédiées au flux de pixels RGB. Il contrôle également le rétroéclairage.
+	•	Procédure de Démarrage (Spécificité Critique) :
+	◦	L'ESP32-S3 dispose d'un bootloader ROM indestructible. Pour téléverser un nouveau programme (ou récupérer une carte qui ne répond plus), la séquence manuelle est obligatoire :
+	1	Maintenir le bouton BOOT enfoncé.
+	2	Appuyer et relâcher le bouton RESET.
+	3	Relâcher le bouton BOOT.
+	◦	Après chaque téléversement via ce mode, un appui manuel sur RESET est nécessaire pour lancer le nouveau programme.
+	•	Identification : Modèle HD40015C40, contrôleur de pilote NV3052C.
+	•	Interface : RGB-666 TTL Parallèle via un connecteur FPC 40 broches.
+	◦	Implication : Cet écran n'a pas de mémoire interne. Il est "stupide". Il doit recevoir un flux continu et parfaitement synchronisé de données de pixels de la part du contrôleur LCD de l'ESP32-S3 pour maintenir une image. La moindre interruption dans ce flux causerait des artefacts à l'écran. C'est le DMA qui assure cette continuité.
+	•	Résolution et Géométrie (Spécificité Critique) :
+	◦	L'écran est physiquement circulaire, mais le contrôleur NV3052C et le pilote de l'ESP32-S3 ne comprennent que les rectangles.
+	◦	Implication : Nos buffers en mémoire sont nécessairement rectangulaires (720x720). Environ 21.5% de cette mémoire (les coins) correspond à des pixels invisibles. C'est la justification de notre optimisation par "masque circulaire pré-calculé", qui permet à la logique de rendu d'ignorer ces zones et d'économiser des cycles CPU.
+
+4. Schéma de Câblage
+	•	Écran -> Qualia S3 : Le connecteur FPC 40 broches de l'écran se connecte directement au connecteur correspondant sur la carte. Aucune autre connexion n'est requise.
+	•	Potentiomètre (Zoom) -> Qualia S3 :
+	◦	Borne 1 (Extrémité) -> 3.3V
+	◦	Borne 2 (Curseur) -> A0
+	◦	Borne 3 (Autre extrémité) -> GND
+	•	Potentiomètre (Rémanence) -> Qualia S3 :
+	◦	Borne 1 (Extrémité) -> 3.3V
+	◦	Borne 2 (Curseur) -> A1
+	◦	Borne 3 (Autre extrémité) -> GND
+
+5. Environnement de Développement Logiciel
+La reproductibilité est garantie par l'utilisation des versions spécifiques suivantes. L'utilisation de versions différentes, en particulier pour Arduino_GFX_Library, peut introduire des changements d'API et casser la compilation.
+	•	IDE : Arduino IDE 2.x (ex: v2.1.0 ou supérieure).
+	•	Paquet de Cartes : esp32 by Espressif Systems, version 3.3.0 ou une version compatible de la branche 3.x (basée sur ESP-IDF v5.1+).
+	•	Bibliothèque Graphique : GFX Library for Arduino by Moon On Our Nation, version 1.6.1. C'est la version sur laquelle notre code a été stabilisé.
+	•	Bibliothèque de Communication : Aucune. La communication SPI est gérée par les pilotes de bas niveau de l'ESP-IDF inclus dans le paquet de cartes.

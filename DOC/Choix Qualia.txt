@@ -1,0 +1,44 @@
+
+
+[DOC] [THÉORIE]
+Dossier de Conception : Rationale Architectural du Qualia GFX Processor
+1. Introduction : L'Évolution d'une Architecture
+Le développement du moteur graphique de la Qualia a suivi un processus itératif, passant de solutions simples mais défectueuses à une architecture finale complexe mais robuste. Chaque décision clé a été prise en réponse directe à un problème de performance, de qualité visuelle ou de robustesse identifié lors des étapes précédentes. Ce document expose la justification de ces choix fondamentaux.
+
+2. Choix Fondamental : L'Architecture Multi-tâches FreeRTOS
+Le Problème : Le cahier des charges impose deux missions concurrentes et asynchrones :
+	1	Une réception de données à haute fréquence et imprévisible (1000 paquets/seconde via SPI).
+	2	Un rendu graphique intensif en calculs, qui doit rester fluide.
+La Décision : Adopter une architecture multi-tâches basée sur FreeRTOS, en séparant le projet en trois tâches spécialisées.
+Le Rationale :
+	•	Fiabilité de la Réception : Une approche monotâche (dans la loop() d'Arduino) aurait inévitablement forcé un compromis : soit attendre les données SPI et sacrifier la fluidité du rendu, soit se concentrer sur le rendu et risquer de perdre des paquets de données. En dédiant une tâche de haute priorité à la source de données, nous garantissons que la réception d'un waypoint est toujours l'événement le plus important, assurant une capture de données sans perte.
+	•	Performance du Rendu : En épinglant la tâche de rendu à son propre cœur de processeur (Cœur 1), nous lui allouons 100% des cycles CPU disponibles, sans aucune compétition de la part des autres tâches applicatives. C'est la garantie d'obtenir la performance de rendu la plus élevée possible.
+	•	Réactivité des Contrôles : En isolant les entrées utilisateur "lentes" (potentiomètres, commandes série) dans une tâche de basse priorité, nous optimisons les ressources. Cette tâche ne consomme du CPU que périodiquement (toutes les 100 ms), laissant les cœurs libres pour les missions critiques le reste du temps, tout en offrant une expérience utilisateur parfaitement réactive.
+
+3. Choix du Moteur de Rémanence : Le "Framebuffer d'État"
+Le Problème : Comment simuler une rémanence de phosphore de manière performante et sans artefacts visuels sur un écran de 720x720 (plus de 500 000 pixels) ?
+Les Alternatives Rejetées :
+	•	Fondu Global du Framebuffer : Rejeté car il saturait la bande passante de la PSRAM, rendant impossible d'atteindre 60 FPS.
+	•	Gestion par Points Actifs ("Spying Driver") : Rejeté car, bien que performant sur le papier, il a introduit une complexité logique extrême qui a mené à des bugs de rendu subtils et difficiles à corriger ("pixels orphelins", conflits de synchronisation).
+La Décision : Utiliser un second framebuffer parallèle, le life_buffer, pour stocker l'état de "vie" de chaque pixel.
+Le Rationale :
+	•	Performance Maximale sur la Superposition : La gestion de la superposition de trace, un point crucial de l'esthétique "oscilloscope", devient une opération en temps constant (O(1)). Mettre à jour la vie d'un pixel existant se résume à une simple écriture en mémoire à un index calculé, ce qui est instantané.
+	•	Robustesse Absolue : En donnant à chaque pixel son propre état mémorisé, les "pixels orphelins" et autres artefacts de désynchronisation deviennent structurellement impossibles. Le life_buffer est la source de vérité unique et infaillible de l'état de la rémanence.
+	•	Arbitrage Conscient : Ce choix représente un arbitrage stratégique. Nous sacrifions consciemment une partie de notre ressource la plus abondante (la PSRAM, dont nous utilisons ~18%) pour gagner en simplicité logique, en robustesse, et en performance sur les opérations critiques. C'est la décision clé qui a permis de stabiliser le projet.
+
+4. Choix du Lissage de Trajectoire : Les Courbes Spline (Catmull-Rom)
+Le Problème : Comment transformer une série de "waypoints" espacés, reçus à 1000 Hz, en une courbe visuellement lisse et continue, sans les "escaliers" (aliasing) d'une ligne droite ?
+Les Alternatives Rejetées :
+	•	Interpolation Linéaire (drawLine ou drawPixel manuel) : Rejetée car elle produit des "lignes brisées" avec des angles vifs, ce qui ne correspond pas à l'esthétique analogique recherchée, surtout à haute vitesse.
+	•	Anti-aliasing de Ligne (Xiaolin Wu) : Rejeté car, bien que visuellement supérieur, il s'est avéré trop coûteux en performance, faisant chuter les FPS de manière inacceptable.
+La Décision : Implémenter un lissage par interpolation de courbe de Catmull-Rom.
+Le Rationale :
+	•	Qualité Visuelle Supérieure : Contrairement à l'interpolation linéaire, une courbe spline utilise les points environnants pour calculer une trajectoire courbe, garantissant que les transitions entre les segments sont parfaitement lisses (continuité C1). Cela élimine les angles vifs et produit le mouvement fluide et organique requis.
+	•	Performance Équilibrée : L'algorithme de Catmull-Rom est plus coûteux que l'interpolation linéaire, mais significativement moins que l'anti-aliasing de Wu. Les benchmarks ont prouvé que l'ESP32-S3 avait un budget de performance colossal, nous permettant d'absorber ce coût de calcul sans sacrifier la fluidité. C'est le meilleur compromis entre la qualité visuelle et la performance.
+
+5. Choix de l'Optimisation de Fondu : Le Masque Circulaire Entrelacé
+Le Problème : La boucle de fondu, qui parcourt le life_buffer, est l'opération la plus intensive du moteur. Comment réduire sa charge de travail sans dégrader la qualité ?
+La Décision : Ne pas traiter les pixels invisibles et répartir la charge de travail dans le temps.
+Le Rationale :
+	•	Masque Circulaire Pré-calculé : Le traitement des ~21.5% de pixels situés dans les coins du framebuffer rectangulaire est un gaspillage pur de cycles CPU. En pré-calculant les limites du cercle au démarrage, la boucle de fondu ne parcourt que les pixels utiles, ce qui représente un gain de performance direct et sans coût.
+	•	Fondu Entrelacé ("Time-Slicing") : Plutôt que de traiter tous les pixels visibles à chaque image (ce qui pourrait encore être trop lourd), nous découpons ce travail en quatre "tranches" entrelacées. À chaque image, nous ne traitons qu'un quart des lignes. Cette répartition intelligente de la charge divise par quatre le coût du fondu par image, rendant l'effet de rémanence compatible avec des FPS très élevés, tout en restant visuellement imperceptible pour l'œil humain.

@@ -1,0 +1,87 @@
+[VALIDÉ]
+Compris. Voici le document de référence unique, long et exhaustif, qui synthétise toutes nos analyses et décisions concernant la communication SPI. Il intègre la vision finale d'un flux de données asynchrone et "sans état", et sert de cahier des charges complet pour le processeur Maître et de description architecturale pour l'Esclave.
+
+[DOC] [THÉORIE]
+Spécification Complète du Protocole de Communication SPI pour le Qualia GFX Processor
+1. Philosophie et Rôle des Composants
+Ce document définit le protocole de communication entre un processeur SPI Maître (le "cerveau") et le coprocesseur graphique Qualia S3 (l'Esclave) (le "bras armé"). L'architecture est fondée sur un principe de flux de données continu et asynchrone. Il n'y a pas de "connexion", de "session" ou de "handshake". Le Maître diffuse une trajectoire en continu ; l'Esclave est un récepteur passif qui peut se synchroniser sur ce flux à n'importe quel moment.
+	•	Rôle du Maître : Sa seule responsabilité est de calculer une séquence de coordonnées 2D ("waypoints") et de les diffuser sur le bus SPI à une fréquence stable. Il est entièrement déchargé de toute considération de rendu, de lissage ou de rémanence. Il opère en "fire-and-forget", sans attendre de réponse.
+	•	Rôle de l'Esclave (Qualia S3) : Sa seule responsabilité est de recevoir passivement les waypoints, de reconstruire la trajectoire courbe et lisse entre eux, et de l'afficher avec l'effet de rémanence "phosphore". Il est conçu pour être robuste et se synchroniser automatiquement sur le flux de données dès qu'il est activé.
+
+2. Spécification de la Couche Physique
+Cette section décrit les connexions matérielles et les paramètres électriques du bus.
+Une connexion physique correcte est non négociable.
+Fonction
+Broche du Maître
+->
+Broche de la Qualia
+GPIO (Qualia)
+Rôle
+Horloge SPI
+SCK
+->
+SCK
+5
+Le Maître génère l'horloge pour synchroniser le transfert.
+Données
+MOSI
+->
+MOSI
+7
+Le Maître envoie les données sur cette ligne.
+Sélection
+CS / SS
+->
+CS
+15
+Le Maître abaisse cette ligne pour signaler le début d'une transaction.
+Masse Commune
+GND
+->
+GND
+-
+CRITIQUE. Les deux cartes doivent partager une référence de masse commune.
+Données (Retour)
+MISO
+->
+MISO
+6
+Optionnel. Notre protocole est unidirectionnel, cette ligne peut être laissée déconnectée.
+Le logiciel du Maître doit configurer son périphérique SPI avec les paramètres suivants pour être compatible avec l'esclave Qualia :
+	•	Mode SPI : SPI_MODE0
+	◦	Détail Technique : CPOL=0 (Clock Polarity, l'horloge est au repos à l'état bas), CPHA=0 (Clock Phase, les données sont échantillonnées sur le front montant de l'horloge). C'est le mode SPI le plus courant et le plus standard.
+	•	Ordre des Bits : MSBFIRST (Most Significant Bit First)
+	◦	Détail Technique : Le bit de poids le plus fort de chaque octet est envoyé en premier. C'est le standard par défaut.
+	•	Fréquence d'Horloge (Clock Speed) : Flexible. Une valeur de 4 MHz (4,000,000 Hz) est un excellent point de départ, stable et performant. Le pilote de la Qualia est capable de supporter des vitesses beaucoup plus élevées (10 MHz+), mais il est recommandé de commencer par une valeur conservatrice.
+
+3. Spécification de la Couche de Données
+Cette section décrit la structure atomique des données échangées.
+	•	Format : La communication se fait exclusivement par paquets binaires de 4 octets.
+	•	Structure : Ces 4 octets doivent correspondre exactement à la structure C++ suivante. L'attribut packed est important pour garantir l'absence d'octets de remplissage (padding) qui pourraient désaligner la communication entre différentes architectures de processeurs.code C++downloadcontent_copyexpand_less    struct __attribute__((packed)) PlotterPacket {
+	•	  uint16_t x; // Coordonnée X, entier non signé de 0 à 719
+	•	  uint16_t y; // Coordonnée Y, entier non signé de 0 à 719
+	•	};
+	•	  
+La seule unité de communication que l'esclave comprend est une "transaction". Pour chaque PlotterPacket à envoyer, le Maître doit exécuter la séquence suivante de manière indivisible :
+	1	Sélectionner l'Esclave : Mettre la broche CS à l'état BAS (LOW).
+	2	Transférer les Données : Envoyer les 4 octets de la structure PlotterPacket sur le bus SPI.
+	3	Désélectionner l'Esclave : Remettre la broche CS à l'état HAUT (HIGH).
+Le front descendant sur CS signale le début de la réception à l'esclave. Le front montant sur CS signale la fin, ce qui déclenche l'interruption matérielle sur la Qualia qui traite le paquet reçu.
+
+4. Spécification de la Couche Applicative
+Cette section décrit la sémantique et la cadence du flux de données.
+	•	Sémantique des Données ("Waypoints") : Les paquets n'encodent pas des pixels, mais des points de passage d'une trajectoire. La responsabilité de l'esclave est de reconstruire une courbe lisse entre ces points. La vitesse du mouvement est donc encodée dans la distance spatiale entre des paquets successifs.
+	•	Cadence des Paquets (Packet Rate) : Le Maître est responsable de maintenir une cadence d'envoi stable. La cible est de 1000 Hz (1000 paquets par seconde).
+	◦	Implémentation : La boucle principale du Maître doit :a. Calculer un nouveau point de trajectoire.b. Exécuter la séquence de transaction complète (CS bas -> Transfert -> CS haut).c. Attendre pendant 1 milliseconde (via delay(1) ou delayMicroseconds(1000)).d. Répéter.
+
+5. Architecture de l'Esclave (Qualia S3)
+L'esclave est conçu pour une robustesse et une performance maximales.
+	•	Pilote Utilisé : L'implémentation utilise le pilote SPI esclave de bas niveau de l'ESP-IDF, et non la bibliothèque Arduino SPI.h. Ceci est nécessaire pour accéder aux fonctionnalités avancées de DMA et d'interruptions.
+	•	Architecture de Réception ("Perpetual Transaction") :
+	1	Initialisation : Une tâche dédiée (spi_listener_task) configure le contrôleur matériel SPI2_HOST.
+	2	DMA et Interruption : La tâche prépare une transaction en fournissant au pilote un buffer de réception en mémoire compatible DMA. Elle s'enregistre ensuite via une fonction "callback" (post_trans_cb) qui sera exécutée à la fin de la transaction.
+	3	Armement : La tâche "arme" le récepteur avec spi_slave_queue_trans() et se met en sommeil profond.
+	4	Réception Matérielle : Lorsque le Maître envoie un paquet, le matériel DMA de l'ESP32 le reçoit et le place dans le buffer sans intervention du CPU.
+	5	Traitement par Interruption : Une fois la transaction terminée (CS remonte), une interruption est déclenchée. La post_trans_cb est exécutée : elle copie le paquet du buffer DMA vers la file d'attente (points_queue) et réveille la spi_listener_task.
+	6	Cycle : La spi_listener_task est réveillée, finalise la transaction terminée, et en arme immédiatement une nouvelle, garantissant que l'esclave est prêt pour le prochain paquet en quelques microsecondes.
+	•	Synchronisation Asynchrone : L'esclave n'a pas besoin d'une séquence de démarrage. Il est conçu pour se synchroniser sur le flux à n'importe quel moment. S'il est démarré au milieu d'une transmission du maître, il ignorera le paquet corrompu et se synchronisera parfaitement sur la prochaine transaction valide (signalée par le front descendant de CS).
