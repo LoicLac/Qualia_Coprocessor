@@ -73,16 +73,17 @@ static void precompute_phosphor_palette() {
 }
 
 static void precompute_circle_mask() {
-    int radius = SCREEN_WIDTH / 2;
+    int center = SCREEN_WIDTH / 2;      // Centre de l'écran: 360
+    int radius = center - 1;             // Rayon: 359 (1 pixel de marge)
     int radius_sq = radius * radius;
     for (int y = 0; y < SCREEN_HEIGHT; y++) {
-        int dy = y - radius;
+        int dy = y - center;             // Distance au centre (pas au rayon)
         int dx_sq = radius_sq - dy * dy;
         if (dx_sq < 0) {
             circle_bounds[y] = {0, 0};
         } else {
             int dx = sqrt(dx_sq);
-            circle_bounds[y].start_x = radius - dx;
+            circle_bounds[y].start_x = center - dx;  // Position depuis le centre
             circle_bounds[y].width = 2 * dx;
         }
     }
@@ -92,18 +93,31 @@ static float catmullRom(float t, float p0, float p1, float p2, float p3) {
     return 0.5f * ((2.0f * p1) + (-p0 + p2) * t + (2.0f * p0 - 5.0f * p1 + 4.0f * p2 - p3) * t * t + (-p0 + 3.0f * p1 - 3.0f * p2 + p3) * t * t * t);
 }
 
-static void draw_catmull_rom_segment(PlotterPacket p0, PlotterPacket p1, PlotterPacket p2, PlotterPacket p3) {
-    int steps = (int)sqrt(pow(p2.x - p1.x, 2) + pow(p2.y - p1.y, 2)) / 2;
-    steps = max(1, steps);
+static void draw_catmull_rom_segment(uint16_t *framebuffer, PlotterPacket p0, PlotterPacket p1, PlotterPacket p2, PlotterPacket p3) {
+    int dx = p2.x - p1.x;
+    int dy = p2.y - p1.y;
+    int steps = (int)sqrt(dx*dx + dy*dy) / 2;
+    
+    // Protection contre les segments trop longs qui causeraient un freeze
+    const int MAX_STEPS = 500;
+    steps = max(1, min(steps, MAX_STEPS));
+    
     for (int i = 0; i <= steps; i++) {
         float t = (float)i / (float)steps;
         float sx = catmullRom(t, p0.x, p1.x, p2.x, p3.x);
         float sy = catmullRom(t, p0.y, p1.y, p2.y, p3.y);
-        long screen_index = (long)sy * SCREEN_WIDTH + (long)sx;
-        if (screen_index >= 0 && screen_index < TOTAL_PIXELS) {
-            life_buffer[screen_index] = 255;
-            gfx->drawPixel(sx, sy, render_palette[255]);
+        
+        // Validation optimisée avec unsigned cast (rejette négatifs ET dépassements en 1 test)
+        int ix = (int)sx;
+        int iy = (int)sy;
+        if ((unsigned)ix >= SCREEN_WIDTH || (unsigned)iy >= SCREEN_HEIGHT) {
+            continue;  // Pixel hors écran, passer au suivant
         }
+        
+        // Pixel valide, écriture sécurisée
+        long screen_index = iy * SCREEN_WIDTH + ix;
+        life_buffer[screen_index] = 255;
+        framebuffer[screen_index] = render_palette[255];
     }
 }
 
@@ -133,6 +147,11 @@ static void control_task(void *pvParameters) {
 
     const int ADC_DEADBAND = 12;
     const float SMOOTH_FACTOR = 0.05;
+    
+    // Pré-calcul pour mapping exponentiel de la rémanence (haute précision près de 0.01ms)
+    // Formule: y = MIN * (MAX/MIN)^(x/4095)
+    // Donne ~50% de la plage ADC pour 0.01ms à 10ms (haute précision traces courtes)
+    const float REMANENCE_LOG_RATIO = log(REMANENCE_MS_MAX / REMANENCE_MS_MIN);
 
     // Utilisation de la variable globale g_spi_initialized_ok déclarée dans DataSource.cpp
     // extern bool g_spi_initialized_ok; // Déjà déclaré dans DataSource.h et inclus
@@ -200,7 +219,9 @@ static void control_task(void *pvParameters) {
 
         // Mise à jour des facteurs de contrôle
         g_zoom_factor = map(smoothed_zoom_adc, 0, 4095, (long)(ZOOM_MIN * 100), (long)(ZOOM_MAX * 100)) / 100.0f;
-        g_remanence_duration_ms = map(smoothed_decay_adc, 0, 4095, REMANENCE_MS_MIN, REMANENCE_MS_MAX);
+        // Mapping exponentiel pour haute précision près de 0.01ms
+        float norm_adc = smoothed_decay_adc / 4095.0f;  // Normaliser 0-1
+        g_remanence_duration_ms = REMANENCE_MS_MIN * exp(norm_adc * REMANENCE_LOG_RATIO);
 
         // Détection de changement pour le zoom (utilisé pour réinitialiser le rendu si nécessaire)
         if (abs(g_zoom_factor - last_smoothed_zoom) > 0.01) {
@@ -236,6 +257,7 @@ static void render_task(void *pvParameters) {
             gfx->fillScreen(BLACK);
             memset(life_buffer, 0, TOTAL_PIXELS);
             waypoint_count = 0; // Réinitialiser le compteur de points pour le nouveau tracé
+            memset(waypoints, 0, sizeof(waypoints)); // Effacer les anciens waypoints
             g_zoom_changed = false;
         }
 
@@ -254,8 +276,9 @@ static void render_task(void *pvParameters) {
                 long current_index = (y * SCREEN_WIDTH) + circle_bounds[y].start_x + i;
                 // Vérifier si le pixel a encore de la "vie"
                 if (life_buffer[current_index] > 0) {
-                    // Décrémenter la vie du pixel (appliquer le déclin)
-                    life_buffer[current_index] = (life_buffer[current_index] > g_trace_decay) ? life_buffer[current_index] - g_trace_decay : 0;
+                    // Décrémenter la vie du pixel (appliquer le déclin) - sans branche pour meilleures performances
+                    uint8_t life = life_buffer[current_index];
+                    life_buffer[current_index] = (life > g_trace_decay) * (life - g_trace_decay);
                     // Mettre à jour le pixel dans le framebuffer graphique avec la couleur correspondante
                     framebuffer[current_index] = render_palette[life_buffer[current_index]];
                 }
@@ -264,13 +287,17 @@ static void render_task(void *pvParameters) {
         // Passer à la tranche suivante pour le prochain rendu d'image
         fade_slice_index = (fade_slice_index + 1) % NUM_FADE_SLICES;
 
+        // Pré-calculer les constantes de zoom (optimisation: 1 fois par frame au lieu de par paquet)
+        float center_offset = SCREEN_WIDTH / 2.0f;
+        float zoom_bias = center_offset * (1.0f - g_zoom_factor);
+
         // Traitement des nouveaux waypoints reçus via la queue
         PlotterPacket p_raw;
         while (xQueueReceive(points_queue, &p_raw, 0) == pdTRUE) {
             PlotterPacket p_zoomed;
-            // Appliquer le facteur de zoom
-            p_zoomed.x = (int16_t)(SCREEN_WIDTH / 2 + (p_raw.x - SCREEN_WIDTH / 2) * g_zoom_factor);
-            p_zoomed.y = (int16_t)(SCREEN_HEIGHT / 2 + (p_raw.y - SCREEN_HEIGHT / 2) * g_zoom_factor);
+            // Appliquer le facteur de zoom avec formule optimisée
+            p_zoomed.x = (int16_t)(p_raw.x * g_zoom_factor + zoom_bias);
+            p_zoomed.y = (int16_t)(p_raw.y * g_zoom_factor + zoom_bias);
 
             // Mettre à jour le buffer de waypoints pour le calcul de la courbe spline
             waypoints[0] = waypoints[1]; waypoints[1] = waypoints[2];
@@ -280,7 +307,7 @@ static void render_task(void *pvParameters) {
 
             // Dessiner le segment de courbe spline si nous avons assez de points
             if (waypoint_count == 4) {
-                draw_catmull_rom_segment(waypoints[0], waypoints[1], waypoints[2], waypoints[3]);
+                draw_catmull_rom_segment(framebuffer, waypoints[0], waypoints[1], waypoints[2], waypoints[3]);
             }
         }
 
