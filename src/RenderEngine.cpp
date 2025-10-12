@@ -29,7 +29,7 @@ static RowBounds circle_bounds[720];
 static const int SCREEN_WIDTH = 720, SCREEN_HEIGHT = 720;
 static const long TOTAL_PIXELS = SCREEN_WIDTH * SCREEN_HEIGHT;
 static const float ZOOM_MIN = 0.1f, ZOOM_MAX = 1.2f;
-static const long REMANENCE_MS_MIN = 1, REMANENCE_MS_MAX = 5000;
+static const float REMANENCE_MS_MIN = 0.01f, REMANENCE_MS_MAX = 3000.0f;
 
 // Variables de contrôle partagées
 volatile float g_zoom_factor = 0.8;
@@ -117,7 +117,7 @@ static void control_task(void *pvParameters) {
     TaskHandle_t lissajousHandle = params->lissajous_handle;
     TaskHandle_t spiHandle = params->spi_handle;
 
-    enum DataSourceMode { MODE_LISSAJOUS, MODE_SPI } current_mode = MODE_LISSAJOUS;
+    enum DataSourceMode { MODE_LISSAJOUS, MODE_SPI } current_mode = MODE_SPI;
 
     // Variables pour les timers des messages série
     unsigned long last_bip_time = 0;
@@ -148,16 +148,16 @@ static void control_task(void *pvParameters) {
                 if (g_spi_initialized_ok) {
                     vTaskResume(spiHandle);
                     current_mode = MODE_SPI;
-                    Serial.println("Mode: SPI Actif");
+                    DEBUG_INFO("Mode: SPI Actif");
                 } else {
-                    Serial.println("Mode: SPI non initialisé. Impossible de passer en mode SPI.");
+                    DEBUG_INFO("Mode: SPI non initialisé. Impossible de passer en mode SPI.");
                     // On reste en mode Lissajous ou on réessaie plus tard
                 }
             } else { // current_mode == MODE_SPI
                 vTaskSuspend(spiHandle);
                 vTaskResume(lissajousHandle);
                 current_mode = MODE_LISSAJOUS;
-                Serial.println("Mode: Lissajous Actif");
+                DEBUG_INFO("Mode: Lissajous Actif");
             }
             delay(250); // Debounce delay
         }
@@ -169,7 +169,7 @@ static void control_task(void *pvParameters) {
             // On vérifie si l'activité SPI est récente (dans les 2 dernières secondes).
             if (current_millis - g_last_spi_packet_time < BIP_INTERVAL) {
                 if (current_millis - last_bip_time >= BIP_INTERVAL) {
-                    Serial.println("[BIP] Reception SPI active.");
+                    DEBUG_INFO("[BIP] Reception SPI active.");
                     last_bip_time = current_millis;
                 }
             }
@@ -177,7 +177,7 @@ static void control_task(void *pvParameters) {
             // SPI_OK: Indique que le bus SPI est initialisé et opérationnel
             if (g_spi_initialized_ok) { // Vérifie si l'initialisation a réussi
                 if (current_millis - last_spi_ok_time >= SPI_OK_INTERVAL) {
-                    Serial.println("[SPI_OK] Bus SPI initialisé et opérationnel.");
+                    DEBUG_INFO("[SPI_OK] Bus SPI initialisé et opérationnel.");
                     last_spi_ok_time = current_millis;
                 }
             }
@@ -209,8 +209,8 @@ static void control_task(void *pvParameters) {
         }
 
         // --- LECTURE DES COMMANDES SÉRIE ---
-        if (Serial.available() > 0) {
-            char cmd = Serial.read();
+        if (SERIAL_AVAILABLE() > 0) {
+            char cmd = SERIAL_READ();
             if (cmd == 'p') g_lissajous_speed *= 1.1; // Augmente la vitesse du simulateur Lissajous
             if (cmd == 'm') g_lissajous_speed /= 1.1; // Diminue la vitesse du simulateur Lissajous
         }
@@ -288,7 +288,7 @@ static void render_task(void *pvParameters) {
         frameCount++;
         if (current_millis - lastFpsTime >= 500) {
             last_displayed_fps = frameCount * (1000.0f / (current_millis - lastFpsTime));
-            Serial.printf("FPS: %.0f\n", last_displayed_fps);
+            DEBUG_INFOF("FPS: %.0f\n", last_displayed_fps);
             lastFpsTime = current_millis;
             frameCount = 0;
         }

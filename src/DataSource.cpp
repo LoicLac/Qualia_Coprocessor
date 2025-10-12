@@ -114,7 +114,7 @@ static void spi_listener_task(void *pvParameters) {
     g_spi_initialized_ok = (ret == ESP_OK);
 
     if (ret != ESP_OK) {
-        Serial.printf("Erreur lors de l'initialisation du SPI esclave : %d\n", ret);
+        DEBUG_ERRORF("Erreur lors de l'initialisation du SPI esclave : %d\n", ret);
         // Dans une application réelle, on pourrait gérer cette erreur de manière plus robuste.
         // Pour ce projet, on marque simplement que l'initialisation a échoué.
         // La tâche continuera, mais g_spi_initialized_ok sera false.
@@ -136,7 +136,7 @@ static void spi_listener_task(void *pvParameters) {
         if (ret != ESP_OK) {
             // Si spi_slave_transmit échoue, c'est une erreur système sérieuse.
             // On pourrait vouloir signaler cela plus gravement, mais pour l'instant, on enregistre seulement.
-            Serial.printf("Erreur lors de la transmission SPI : %d\n", ret);
+            DEBUG_ERRORF("Erreur lors de la transmission SPI : %d\n", ret);
             // Il pourrait être nécessaire de réinitialiser le périphérique SPI dans un cas réel.
         }
         // Si ret == ESP_OK, la transaction est terminée et l'ISR `post_trans_cb` a déjà été appelée.
@@ -155,9 +155,9 @@ void start_data_source_tasks(TaskHandle_t* outLissajousHandle, TaskHandle_t* out
     xTaskCreatePinnedToCore(
         spi_listener_task, "SPI Listener", 4096, NULL, 2, outSpiHandle, 0);
 
-    // Par défaut, la tâche SPI est suspendue au démarrage.
-    // La tâche de contrôle s'occupera de la reprendre quand nécessaire.
-    if (*outSpiHandle != NULL) {
-        vTaskSuspend(*outSpiHandle);
+    // Par défaut, le mode SPI est actif au démarrage.
+    // On suspend la tâche Lissajous.
+    if (*outLissajousHandle != NULL) {
+        vTaskSuspend(*outLissajousHandle);
     }
 }

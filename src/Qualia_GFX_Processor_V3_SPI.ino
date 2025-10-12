@@ -10,10 +10,10 @@
 
 #include "RenderEngine.h"
 #include "DataSource.h"
+#include "../shared_protocol.h"
 
 void setup() {
-    Serial.begin(9600);
-    delay(2000);
+    DEBUG_INIT();
 
     // Les "handles" sont comme des télécommandes pour nos tâches.
     TaskHandle_t lissajousTaskHandle = NULL;

@@ -1,0 +1,261 @@
+
+
+### **Module : SPI XY OUTPUT**
+
+**Objectif :** Capturer les coordonnées de simulation générées dans le contexte audio temps réel, les sous-échantillonner, les formater, et les transmettre de manière fiable à un co-processeur graphique via le bus SPI, où la Daisy Seed agit en tant que Maître.
+
+---
+
+### **1. La Structure de Données (Le Contrat)**
+
+C'est le format binaire des données qui seront envoyées sur le bus SPI. Cette structure doit être identique dans le code C++ de la Daisy et dans le code du récepteur (Python, C++, etc.).
+
+```cpp
+// Fichier : shared_protocol.h (peut être partagé entre les projets)
+
+// L'attribut 'packed' est une directive pour le compilateur. Il garantit que la
+// structure n'a pas de "rembourrage" (padding) mémoire. C'est crucial pour
+// assurer une compatibilité binaire parfaite entre différents systèmes (ex: C++ et Python).
+struct __attribute__((packed)) PlotterPacket {
+  // Coordonnées de l'écran. uint16_t est un entier non signé de 16 bits,
+  // suffisant pour des résolutions jusqu'à 65535x65535.
+  uint16_t x;
+  uint16_t y;
+};
+```
+
+---
+
+### **2. La Méthode de Récupération des Données (Le Pipeline Interne)**
+
+La transmission de données entre le contexte temps réel (`AudioCallback`) et le contexte non temps réel (`loop`) est le point le plus critique.
+
+**A. La Source de Vérité : Le Contexte `AudioCallback`**
+*   **Fréquence :** 48 kHz.
+*   **Tâche :**
+    1.  Calcule les coordonnées `(x, y)` du système dynamique sous forme de `float`. C'est la donnée la plus fraîche et la plus précise.
+    2.  Utilise ces `float` pour générer les échantillons audio.
+    3.  **Stocke ces `float` dans deux variables globales partagées.**
+*   **Contrainte :** Ce contexte ne doit **jamais** appeler de fonction SPI.
+
+**B. Le Pont : Les Variables Globales Partagées**
+Ce sont les deux variables qui permettent la communication entre les contextes.
+```cpp
+// Ces variables sont déclarées globalement dans votre fichier .cpp
+// 'volatile' est une instruction obligatoire pour le compilateur. Il lui interdit
+// de mettre en cache la valeur de ces variables, le forçant à toujours lire
+// leur état le plus récent en mémoire, car elles peuvent être modifiées à
+// tout moment par une interruption (le callback audio).
+volatile float shared_x_lorenz;
+volatile float shared_y_lorenz;
+```
+
+**C. La Lecture Sécurisée : La Section Critique**
+Pour lire ces deux variables depuis la `loop()` sans risquer qu'une interruption audio ne les modifie en pleine lecture (ce qui pourrait "déchirer" les données), on utilise une section critique.
+
+```cpp
+float local_x, local_y;
+
+noInterrupts(); // Début de la section critique. Aucune interruption ne peut se produire.
+local_x = shared_x_lorenz;
+local_y = shared_y_lorenz;
+interrupts(); // Fin de la section critique. Les interruptions sont réactivées.
+```
+Cette opération est extrêmement rapide et garantit l'intégrité atomique des données.
+
+---
+
+### **3. Le Timing de Transmission**
+
+Envoyer des données à chaque `loop()` est inefficace. On implémente un timer non-bloquant pour réguler la fréquence d'envoi.
+
+*   **Fréquence Cible :** Entre 500 Hz et 1000 Hz est un excellent compromis. Assez rapide pour une trace lisse, assez lent pour ne pas surcharger le récepteur.
+*   **Méthode :** Utilisation de la fonction `millis()`.
+
+```cpp
+// Variables globales pour le timing
+unsigned long last_send_time = 0;
+const int SEND_INTERVAL_MS = 1; // 1ms = 1000 Hz. Mettre 2 pour 500 Hz.
+
+// Dans la loop()
+if (millis() - last_send_time >= SEND_INTERVAL_MS) {
+  last_send_time = millis();
+  // ... Code d'envoi SPI ici ...
+}
+```
+
+---
+
+### **4. L'Implémentation du Module de Code**
+
+Voici une implémentation propre, sous forme de classe statique, que vous pouvez intégrer dans votre projet.
+
+#### **Fichier `SpiXYOutput.h`**
+
+```h
+#pragma once
+
+#include "shared_protocol.h" // Inclut la définition de PlotterPacket
+
+class SpiXYOutput {
+public:
+  // Variables partagées accessibles depuis l'AudioCallback
+  static volatile float shared_x;
+  static volatile float shared_y;
+
+  // Initialise le matériel SPI et les broches
+  static void Init();
+
+  // Fonction à appeler en continu dans la loop() principale
+  // Gère le timing et l'envoi des données.
+  static void Process();
+
+private:
+  // Paramètres internes
+  static unsigned long last_send_time;
+};
+```
+
+#### **Fichier `SpiXYOutput.cpp`**
+
+```cpp
+#include "SpiXYOutput.h"
+#include <DaisyDuino.h>
+#include <SPI.h>
+
+// Définition des variables statiques
+volatile float SpiXYOutput::shared_x = 0.0f;
+volatile float SpiXYOutput::shared_y = 0.0f;
+unsigned long SpiXYOutput::last_send_time = 0;
+
+// Constantes de configuration
+const int SPI_SEND_INTERVAL_MS = 1; // 1000 Hz
+const long SPI_CLOCK_SPEED = 20000000; // 20 MHz
+// Remplacez PIN_SPI_SS par la broche GPIO que vous utilisez pour le Chip Select
+const int CS_PIN = PIN_SPI_SS; 
+
+// Paramètres de mapping (à ajuster selon votre simulation)
+const float LORENZ_MIN = -20.0f;
+const float LORENZ_MAX = 20.0f;
+const int SCREEN_MAX = 719; // Pour un écran 720x720
+
+
+void SpiXYOutput::Init() {
+  pinMode(CS_PIN, OUTPUT);
+  digitalWrite(CS_PIN, HIGH);
+  SPI.begin();
+}
+
+void SpiXYOutput::Process() {
+  if (millis() - last_send_time >= SPI_SEND_INTERVAL_MS) {
+    last_send_time = millis();
+
+    float temp_x, temp_y;
+    PlotterPacket packet;
+
+    // --- Section Critique ---
+    noInterrupts();
+    temp_x = shared_x;
+    temp_y = shared_y;
+    interrupts();
+    // --- Fin Section Critique ---
+
+    // Mapper les coordonnées float vers les coordonnées écran uint16_t
+    packet.x = (uint16_t)map(temp_x, LORENZ_MIN, LORENZ_MAX, 0, SCREEN_MAX);
+    packet.y = (uint16_t)map(temp_y, LORENZ_MIN, LORENZ_MAX, 0, SCREEN_MAX);
+
+    // Préparer et effectuer la transaction SPI
+    SPISettings spi_settings(SPI_CLOCK_SPEED, MSBFIRST, SPI_MODE0);
+    SPI.beginTransaction(spi_settings);
+    digitalWrite(CS_PIN, LOW);
+    SPI.transfer(&packet, sizeof(packet));
+    digitalWrite(CS_PIN, HIGH);
+    SPI.endTransaction();
+  }
+}
+```
+
+#### **Intégration dans votre Sketch Principal**
+
+```cpp
+#include "SpiXYOutput.h"
+
+// ... autres includes ...
+
+// AudioCallback
+void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, size_t size) {
+  // ... calculs ...
+  float lorenz_x = ...;
+  float lorenz_y = ...;
+  
+  // Mettre à jour les variables partagées du module
+  SpiXYOutput::shared_x = lorenz_x;
+  SpiXYOutput::shared_y = lorenz_y;
+  
+  // ... générer l'audio ...
+}
+
+void setup() {
+  // ... initialisation de la Daisy ...
+  SpiXYOutput::Init();
+  // ... démarrer l'audio ...
+}
+
+void loop() {
+  SpiXYOutput::Process();
+  // ... lire les contrôles, etc. ...
+}
+
+
+
+
+note explication : 
+
+Absolument. C'est une excellente idée de décortiquer ces lignes de configuration. Ce sont les "boutons de réglage" de votre module de communication, et comprendre chacun d'eux est crucial pour adapter le code à votre matériel et à votre simulation.
+
+Analysons ce bloc de constantes, ligne par ligne.
+
+---
+
+### **1. `const long SPI_CLOCK_SPEED = 20000000; // 20 MHz`**
+
+*   **`const long` :** Déclare une variable nommée `SPI_CLOCK_SPEED` comme une constante (`const`), ce qui signifie que sa valeur ne peut pas être changée pendant l'exécution du programme. Le type `long` est utilisé pour stocker de grands nombres entiers.
+*   **`20000000` :** C'est la **vitesse du bus SPI**, exprimée en **bits par seconde**.
+    *   20 000 000 bits/s = 20 Mégabits/s = **20 MHz**.
+*   **Explication :** C'est la vitesse à laquelle la Daisy (le Maître) va faire "tic-tac" sur la broche d'horloge (SCLK) pour envoyer les données à l'esclave (le Pi ou l'ESP32). C'est le "tempo" de la communication.
+*   **Pourquoi cette valeur ?** 20 MHz est une vitesse **rapide mais sûre** pour une communication entre deux cartes proches l'une de l'autre avec des fils de bonne qualité. La Daisy et le Pi peuvent théoriquement aller plus vite, mais 20 MHz est un excellent point de départ qui garantit une communication fiable. Si vous rencontriez des erreurs de transmission (ce qui est peu probable), vous pourriez baisser cette valeur à 10 MHz ou 5 MHz pour augmenter la stabilité.
+*   **En résumé :** C'est le **débit de la connexion** entre les deux processeurs.
+
+---
+
+### **2. `const int CS_PIN = PIN_SPI_SS;`**
+
+*   **`const int` :** Déclare une constante entière nommée `CS_PIN`.
+*   **`PIN_SPI_SS` :** C'est une **constante prédéfinie** par l'environnement Arduino/DaisyDuino. Elle correspond au numéro de la broche "par défaut" désignée pour le **Chip Select** (aussi appelé Slave Select, d'où le `SS`) du bus SPI principal.
+    *   Sur la Daisy Seed, cette broche est la `D10` (aussi appelée `PA4`).
+*   **Explication :** La ligne Chip Select est comme une sonnette. Avant de parler à un esclave, le maître doit "sonner" en passant cette broche à un niveau de tension bas (LOW). Quand il a fini, il la repasse à un niveau haut (HIGH) pour "raccrocher".
+*   **Pourquoi est-ce une variable ?** Vous n'êtes pas obligé d'utiliser la broche par défaut. Vous pourriez décider d'utiliser n'importe quelle autre broche numérique, comme `D5`. Dans ce cas, vous changeriez la ligne en :
+    `const int CS_PIN = D5;`
+    Il faudrait alors bien sûr connecter la broche `D5` de la Daisy à la broche `CE0` du Raspberry Pi.
+*   **En résumé :** C'est la **broche physique** que la Daisy utilise pour **activer la communication** avec le co-processeur.
+
+---
+
+### **3. `const float LORENZ_MIN = -20.0f;` et `const float LORENZ_MAX = 20.0f;`**
+
+*   **`const float` :** Déclare des constantes de type nombre à virgule flottante (`float`). Le `f` à la fin (`-20.0f`) est une bonne pratique en C++ pour s'assurer que le nombre est bien traité comme un `float`.
+*   **Explication :** Ces deux variables définissent la **plage de valeurs attendue** pour les coordonnées `(x, y)` générées par votre simulation de l'attracteur de Lorenz.
+*   **À quoi servent-elles ?** Elles sont utilisées par la fonction `map()` pour faire la conversion (le "scaling"). La fonction `map()` a besoin de savoir :
+    1.  La valeur à convertir (`temp_x`).
+    2.  La plage de départ de cette valeur (`LORENZ_MIN` à `LORENZ_MAX`).
+    3.  La plage de destination (`0` à `SCREEN_MAX`).
+*   **Comment les régler ?** Avant de finaliser votre code, vous devriez faire tourner votre simulation de Lorenz et observer les valeurs minimales et maximales que les coordonnées X et Y atteignent en pratique. Si vous voyez que votre X ne varie qu'entre -15 et +18, vous devriez ajuster ces constantes pour avoir une conversion plus précise. Par exemple :
+    `const float LORENZ_MIN = -15.0f;`
+    `const float LORENZ_MAX = 18.0f;`
+    Si vous ne le faites pas, une partie de la résolution de votre écran ne sera jamais utilisée.
+*   **En résumé :** C'est la **"carte" de votre univers physique**. Elle dit au programme comment traduire les coordonnées du monde de Lorenz en coordonnées du monde de l'écran.
+
+Ces trois blocs de constantes sont les paramètres essentiels qui lient votre code abstrait au monde physique (les broches, la vitesse du bus) et au monde de votre simulation (la plage des données).
+
+
+

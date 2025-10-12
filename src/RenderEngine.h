@@ -11,11 +11,7 @@
 #include <Arduino.h>
 #include <Arduino_GFX_Library.h>
 #include <math.h>
-
-struct __attribute__((packed)) PlotterPacket {
-  int16_t x;
-  int16_t y;
-};
+#include "../shared_protocol.h"
 
 extern QueueHandle_t points_queue;
 
