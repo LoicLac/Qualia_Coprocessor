@@ -28,14 +28,11 @@ static RowBounds circle_bounds[720];
 // Constantes
 static const int SCREEN_WIDTH = 720, SCREEN_HEIGHT = 720;
 static const long TOTAL_PIXELS = SCREEN_WIDTH * SCREEN_HEIGHT;
-static const float ZOOM_MIN = 0.1f, ZOOM_MAX = 1.2f;
 static const float REMANENCE_MS_MIN = 0.01f, REMANENCE_MS_MAX = 3000.0f;
 
 // Variables de contrôle partagées
-volatile float g_zoom_factor = 0.8;
 volatile float g_remanence_duration_ms = 500;
 volatile int g_trace_decay = 4;
-volatile bool g_zoom_changed = false;
 volatile bool g_remanence_changed = true;
 
 // Lien vers la variable pour le heartbeat SPI
@@ -45,9 +42,6 @@ extern volatile unsigned long g_last_spi_packet_time;
 QueueHandle_t points_queue;
 
 // Variables pour le smoothing des entrées ADC et le suivi des changements
-static float last_smoothed_zoom = 0.8; // Déclaration statique pour control_task
-static int last_zoom_adc = 0;
-static float smoothed_zoom_adc = 0;
 static int last_decay_adc = 0;
 static float smoothed_decay_adc = 0;
 
@@ -132,8 +126,6 @@ static void control_task(void *pvParameters) {
     const unsigned long SPI_OK_INTERVAL = 2000; // 2 secondes
 
     // Lecture initiale pour le smoothing
-    last_zoom_adc = analogRead(A0);
-    smoothed_zoom_adc = last_zoom_adc;
     last_decay_adc = analogRead(A1);
     smoothed_decay_adc = last_decay_adc;
 
@@ -169,13 +161,7 @@ static void control_task(void *pvParameters) {
             }
         }
 
-        // --- LECTURE DES POTENTIOMÈTRES ---
-        int raw_zoom_adc = analogRead(A0);
-        // Mise à jour du smoothing pour le zoom
-        if (abs(raw_zoom_adc - last_zoom_adc) > ADC_DEADBAND) {
-            smoothed_zoom_adc = SMOOTH_FACTOR * raw_zoom_adc + (1 - SMOOTH_FACTOR) * smoothed_zoom_adc;
-            last_zoom_adc = raw_zoom_adc;
-        }
+        // --- LECTURE DU POTENTIOMÈTRE RÉMANENCE ---
         int raw_decay_adc = analogRead(A1);
         // Mise à jour du smoothing pour la rémanence
         if (abs(raw_decay_adc - last_decay_adc) > ADC_DEADBAND) {
@@ -184,17 +170,9 @@ static void control_task(void *pvParameters) {
             g_remanence_changed = true;
         }
 
-        // Mise à jour des facteurs de contrôle
-        g_zoom_factor = map(smoothed_zoom_adc, 0, 4095, (long)(ZOOM_MIN * 100), (long)(ZOOM_MAX * 100)) / 100.0f;
-        // Mapping exponentiel pour haute précision près de 0.01ms
+        // Mise à jour de la rémanence (mapping exponentiel pour haute précision près de 0.01ms)
         float norm_adc = smoothed_decay_adc / 4095.0f;  // Normaliser 0-1
         g_remanence_duration_ms = REMANENCE_MS_MIN * exp(norm_adc * REMANENCE_LOG_RATIO);
-
-        // Détection de changement pour le zoom (utilisé pour réinitialiser le rendu si nécessaire)
-        if (abs(g_zoom_factor - last_smoothed_zoom) > 0.01) {
-            g_zoom_changed = true;
-            last_smoothed_zoom = g_zoom_factor; // Mise à jour de la dernière valeur affichée/utilisée
-        }
 
         vTaskDelay(pdMS_TO_TICKS(10)); // Petite pause pour ne pas saturer le CPU
     }
@@ -212,14 +190,6 @@ static void render_task(void *pvParameters) {
 
     for (;;) {
         unsigned long current_millis = millis(); // Déclarée localement dans la boucle
-
-        if (g_zoom_changed) {
-            gfx->fillScreen(BLACK);
-            memset(life_buffer, 0, TOTAL_PIXELS);
-            waypoint_count = 0; // Réinitialiser le compteur de points pour le nouveau tracé
-            memset(waypoints, 0, sizeof(waypoints)); // Effacer les anciens waypoints
-            g_zoom_changed = false;
-        }
 
         if (g_remanence_changed) {
             // Recalcul du facteur de déclin basé sur la durée de rémanence et le FPS actuel
@@ -247,21 +217,12 @@ static void render_task(void *pvParameters) {
         // Passer à la tranche suivante pour le prochain rendu d'image
         fade_slice_index = (fade_slice_index + 1) % NUM_FADE_SLICES;
 
-        // Pré-calculer les constantes de zoom (optimisation: 1 fois par frame au lieu de par paquet)
-        float center_offset = SCREEN_WIDTH / 2.0f;
-        float zoom_bias = center_offset * (1.0f - g_zoom_factor);
-
-        // Traitement des nouveaux waypoints reçus via la queue
-        PlotterPacket p_raw;
-        while (xQueueReceive(points_queue, &p_raw, 0) == pdTRUE) {
-            PlotterPacket p_zoomed;
-            // Appliquer le facteur de zoom avec formule optimisée
-            p_zoomed.x = (int16_t)(p_raw.x * g_zoom_factor + zoom_bias);
-            p_zoomed.y = (int16_t)(p_raw.y * g_zoom_factor + zoom_bias);
-
+        // Traitement des nouveaux waypoints reçus via la queue (affichage 1:1 direct)
+        PlotterPacket p;
+        while (xQueueReceive(points_queue, &p, 0) == pdTRUE) {
             // Mettre à jour le buffer de waypoints pour le calcul de la courbe spline
             waypoints[0] = waypoints[1]; waypoints[1] = waypoints[2];
-            waypoints[2] = waypoints[3]; waypoints[3] = p_zoomed;
+            waypoints[2] = waypoints[3]; waypoints[3] = p;
 
             if (waypoint_count < 4) waypoint_count++; // Incrémenter seulement si on n'a pas encore 4 points
 
