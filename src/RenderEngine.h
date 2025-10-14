@@ -16,5 +16,5 @@
 extern QueueHandle_t points_queue;
 
 void setup_renderer_and_controls();
-// La signature est modifiée pour accepter les handles des tâches de données
-void start_render_and_control_tasks(TaskHandle_t lissajousHandle, TaskHandle_t spiHandle);
+// Démarre les tâches de rendu et de contrôle
+void start_render_and_control_tasks(TaskHandle_t spiHandle);

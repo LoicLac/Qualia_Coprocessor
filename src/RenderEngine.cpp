@@ -38,8 +38,6 @@ volatile int g_trace_decay = 4;
 volatile bool g_zoom_changed = false;
 volatile bool g_remanence_changed = true;
 
-// Lien vers la variable définie dans DataSource.cpp
-volatile float g_lissajous_speed;
 // Lien vers la variable pour le heartbeat SPI
 extern volatile unsigned long g_last_spi_packet_time;
 
@@ -124,14 +122,8 @@ static void draw_catmull_rom_segment(uint16_t *framebuffer, PlotterPacket p0, Pl
 
 // --- TÂCHES FREE_RTOS ---
 
-struct ControlTaskParams { TaskHandle_t lissajous_handle; TaskHandle_t spi_handle; };
-
 static void control_task(void *pvParameters) {
-    ControlTaskParams* params = (ControlTaskParams*)pvParameters;
-    TaskHandle_t lissajousHandle = params->lissajous_handle;
-    TaskHandle_t spiHandle = params->spi_handle;
-
-    enum DataSourceMode { MODE_LISSAJOUS, MODE_SPI } current_mode = MODE_SPI;
+    // Le mode est maintenant fixé sur SPI uniquement
 
     // Variables pour les timers des messages série
     unsigned long last_bip_time = 0;
@@ -159,46 +151,21 @@ static void control_task(void *pvParameters) {
     for (;;) {
         unsigned long current_millis = millis();
 
-        // --- GESTION DU BOUTON UP POUR CHANGER DE MODE ---
-        if (!expander->digitalRead(PCA_BUTTON_UP)) {
-            if (current_mode == MODE_LISSAJOUS) {
-                vTaskSuspend(lissajousHandle);
-                // Vérifier si la tâche SPI a été initialisée avant de la reprendre
-                if (g_spi_initialized_ok) {
-                    vTaskResume(spiHandle);
-                    current_mode = MODE_SPI;
-                    DEBUG_INFO("Mode: SPI Actif");
-                } else {
-                    DEBUG_INFO("Mode: SPI non initialisé. Impossible de passer en mode SPI.");
-                    // On reste en mode Lissajous ou on réessaie plus tard
-                }
-            } else { // current_mode == MODE_SPI
-                vTaskSuspend(spiHandle);
-                vTaskResume(lissajousHandle);
-                current_mode = MODE_LISSAJOUS;
-                DEBUG_INFO("Mode: Lissajous Actif");
+        // --- GESTION DES MESSAGES PÉRIODIQUES ---
+        // BIP: Indique la réception continue de paquets SPI
+        // On vérifie si l'activité SPI est récente (dans les 2 dernières secondes).
+        if (current_millis - g_last_spi_packet_time < BIP_INTERVAL) {
+            if (current_millis - last_bip_time >= BIP_INTERVAL) {
+                DEBUG_INFO("[BIP] Reception SPI active.");
+                last_bip_time = current_millis;
             }
-            delay(250); // Debounce delay
         }
 
-        // --- GESTION DES MESSAGES PÉRIODIQUES ---
-        // Ces messages ne s'affichent que si le mode SPI est actif.
-        if (current_mode == MODE_SPI) {
-            // BIP: Indique la réception continue de paquets SPI
-            // On vérifie si l'activité SPI est récente (dans les 2 dernières secondes).
-            if (current_millis - g_last_spi_packet_time < BIP_INTERVAL) {
-                if (current_millis - last_bip_time >= BIP_INTERVAL) {
-                    DEBUG_INFO("[BIP] Reception SPI active.");
-                    last_bip_time = current_millis;
-                }
-            }
-
-            // SPI_OK: Indique que le bus SPI est initialisé et opérationnel
-            if (g_spi_initialized_ok) { // Vérifie si l'initialisation a réussi
-                if (current_millis - last_spi_ok_time >= SPI_OK_INTERVAL) {
-                    DEBUG_INFO("[SPI_OK] Bus SPI initialisé et opérationnel.");
-                    last_spi_ok_time = current_millis;
-                }
+        // SPI_OK: Indique que le bus SPI est initialisé et opérationnel
+        if (g_spi_initialized_ok) { // Vérifie si l'initialisation a réussi
+            if (current_millis - last_spi_ok_time >= SPI_OK_INTERVAL) {
+                DEBUG_INFO("[SPI_OK] Bus SPI initialisé et opérationnel.");
+                last_spi_ok_time = current_millis;
             }
         }
 
@@ -227,13 +194,6 @@ static void control_task(void *pvParameters) {
         if (abs(g_zoom_factor - last_smoothed_zoom) > 0.01) {
             g_zoom_changed = true;
             last_smoothed_zoom = g_zoom_factor; // Mise à jour de la dernière valeur affichée/utilisée
-        }
-
-        // --- LECTURE DES COMMANDES SÉRIE ---
-        if (SERIAL_AVAILABLE() > 0) {
-            char cmd = SERIAL_READ();
-            if (cmd == 'p') g_lissajous_speed *= 1.1; // Augmente la vitesse du simulateur Lissajous
-            if (cmd == 'm') g_lissajous_speed /= 1.1; // Diminue la vitesse du simulateur Lissajous
         }
 
         vTaskDelay(pdMS_TO_TICKS(10)); // Petite pause pour ne pas saturer le CPU
@@ -325,12 +285,9 @@ static void render_task(void *pvParameters) {
 
 // --- IMPLÉMENTATION DE L'INTERFACE PUBLIQUE ---
 
-void start_render_and_control_tasks(TaskHandle_t lissajousHandle, TaskHandle_t spiHandle) {
-    static ControlTaskParams params;
-    params.lissajous_handle = lissajousHandle;
-    params.spi_handle = spiHandle;
-
-    xTaskCreatePinnedToCore(control_task, "Controls", 4096, &params, 0, NULL, 0);
+void start_render_and_control_tasks(TaskHandle_t spiHandle) {
+    // Le handle SPI n'est plus utilisé car la tâche SPI tourne en permanence
+    xTaskCreatePinnedToCore(control_task, "Controls", 4096, NULL, 0, NULL, 0);
     xTaskCreatePinnedToCore(render_task, "Render", 16384, NULL, 1, NULL, 1);
 }
 
@@ -349,8 +306,6 @@ void setup_renderer_and_controls() {
     if (!gfx->begin()) { while (1); }
     expander->pinMode(PCA_TFT_BACKLIGHT, OUTPUT);
     expander->digitalWrite(PCA_TFT_BACKLIGHT, HIGH);
-    expander->pinMode(PCA_BUTTON_UP, INPUT);
-    g_lissajous_speed = 0.05f; // Valeur par défaut pour que le mouvement soit visible
     life_buffer = (uint8_t *)ps_malloc(TOTAL_PIXELS * sizeof(uint8_t));
     if (!life_buffer) { while(1); } // Allocation échouée, bloquer le système
     memset(life_buffer, 0, TOTAL_PIXELS); // Initialiser le buffer de vie à zéro

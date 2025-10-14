@@ -10,8 +10,8 @@
 
 #include <Arduino.h>
 
-// La signature est modifiée pour "retourner" les handles des tâches créées
-void start_data_source_tasks(TaskHandle_t* outLissajousHandle, TaskHandle_t* outSpiHandle);
+// Crée et démarre la tâche SPI listener
+void start_data_source_tasks(TaskHandle_t* outSpiHandle);
 
 // Déclaration de la variable globale pour l'initialisation SPI
 extern bool g_spi_initialized_ok;

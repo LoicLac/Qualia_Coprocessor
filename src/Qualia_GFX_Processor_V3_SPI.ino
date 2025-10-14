@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT
  *
  * Project: Qualia-S3 Vector Scope
- * Version: 2.0 - SPI Refactoring Step 1
+ * Version: 3.0 - SPI Only (Lissajous removed)
  *
  * Rôle: Chef d'orchestre.
  */
@@ -15,19 +15,17 @@
 void setup() {
     DEBUG_INIT();
 
-    // Les "handles" sont comme des télécommandes pour nos tâches.
-    TaskHandle_t lissajousTaskHandle = NULL;
+    // Handle pour la tâche SPI
     TaskHandle_t spiTaskHandle = NULL;
 
     // 1. Initialiser le sous-système de rendu et de contrôle
     setup_renderer_and_controls();
 
-    // 2. Créer les tâches de source de données et récupérer leurs handles
-    start_data_source_tasks(&lissajousTaskHandle, &spiTaskHandle);
+    // 2. Créer la tâche de source de données SPI
+    start_data_source_tasks(&spiTaskHandle);
 
-    // 3. Lancer les tâches de rendu et de contrôle, en leur donnant les handles
-    // pour qu'elles puissent contrôler les sources de données.
-    start_render_and_control_tasks(lissajousTaskHandle, spiTaskHandle);
+    // 3. Lancer les tâches de rendu et de contrôle
+    start_render_and_control_tasks(spiTaskHandle);
 }
 
 void loop() {

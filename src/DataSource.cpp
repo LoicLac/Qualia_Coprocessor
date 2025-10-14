@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: MIT
  *
  * Fichier: DataSource.cpp
- * Rôle: Implémentation finale des sources de données commutables (Lissajous & SPI).
- * Version: 2.0 - SPI Slave Implementation
+ * Rôle: Implémentation de la source de données SPI esclave.
+ * Version: 3.0 - SPI Only (Lissajous removed)
  */
 
 #include "DataSource.h"
@@ -20,7 +20,6 @@
 
 static const int SCREEN_WIDTH = 720;
 static const int SCREEN_HEIGHT = 720;
-extern volatile float g_lissajous_speed; // Défini et contrôlé dans RenderEngine
 volatile unsigned long g_last_spi_packet_time = 0;
 
 // Variable globale pour indiquer si le SPI a été initialisé correctement
@@ -60,27 +59,7 @@ void IRAM_ATTR post_trans_cb(spi_slave_transaction_t *trans) {
 }
 
 // =======================================================
-// TÂCHE 1 : Producteur Lissajous
-// =======================================================
-static void lissajous_task(void *pvParameters) {
-    float lissajous_time = 0.0;
-    float lissajous_freq_a = 3.0, lissajous_freq_b = 4.0;
-    float lissajous_phase = M_PI / 2.0;
-    for (;;) {
-        vTaskDelay(1 / portTICK_PERIOD_MS); // Délai pour simuler une cadence
-        lissajous_time += g_lissajous_speed;
-        float amplitude = SCREEN_WIDTH / 2.0;
-        PlotterPacket packet;
-        packet.x = (int16_t)(SCREEN_WIDTH / 2 + amplitude * sin(lissajous_freq_a * lissajous_time + lissajous_phase));
-        packet.y = (int16_t)(SCREEN_HEIGHT / 2 + amplitude * sin(lissajous_freq_b * lissajous_time));
-        if (points_queue != NULL) {
-            xQueueSend(points_queue, &packet, 0); // Envoi sans bloquer
-        }
-    }
-}
-
-// =======================================================
-// TÂCHE 2 : Listener SPI
+// TÂCHE : Listener SPI
 // =======================================================
 static void spi_listener_task(void *pvParameters) {
     esp_err_t ret;
@@ -146,18 +125,8 @@ static void spi_listener_task(void *pvParameters) {
 
 
 // --- IMPLÉMENTATION DE L'INTERFACE PUBLIQUE ---
-void start_data_source_tasks(TaskHandle_t* outLissajousHandle, TaskHandle_t* outSpiHandle) {
-    // Création de la tâche Lissajous sur le coeur 0
-    xTaskCreatePinnedToCore(
-        lissajous_task, "Lissajous", 4096, NULL, 2, outLissajousHandle, 0);
-
+void start_data_source_tasks(TaskHandle_t* outSpiHandle) {
     // Création de la tâche SPI Listener sur le coeur 0
     xTaskCreatePinnedToCore(
         spi_listener_task, "SPI Listener", 4096, NULL, 2, outSpiHandle, 0);
-
-    // Par défaut, le mode SPI est actif au démarrage.
-    // On suspend la tâche Lissajous.
-    if (*outLissajousHandle != NULL) {
-        vTaskSuspend(*outLissajousHandle);
-    }
 }
