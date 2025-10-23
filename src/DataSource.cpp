@@ -52,8 +52,8 @@ void IRAM_ATTR post_trans_cb(spi_slave_transaction_t *trans) {
 
     // Envoyer le paquet à la file d'attente de la tâche de rendu
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-    if (points_queue != NULL) { // Vérifier que la queue a été créée
-        xQueueSendFromISR(points_queue, &packet, &xHigherPriorityTaskWoken);
+    if (raw_points_queue != NULL) { // Vérifier que la queue a été créée
+        xQueueSendFromISR(raw_points_queue, &packet, &xHigherPriorityTaskWoken);
     }
     // Noter: Pas de gestion d'erreur explicite ici comme demandé.
 }

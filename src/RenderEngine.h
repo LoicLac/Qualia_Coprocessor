@@ -14,6 +14,7 @@
 #include "../shared_protocol.h"
 
 extern QueueHandle_t points_queue;
+extern QueueHandle_t raw_points_queue;
 
 void setup_renderer_and_controls();
 // Démarre les tâches de rendu et de contrôle

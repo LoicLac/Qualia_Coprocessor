@@ -34,16 +34,21 @@ static const float REMANENCE_MS_MIN = 0.01f, REMANENCE_MS_MAX = 3000.0f;
 volatile float g_remanence_duration_ms = 500;
 volatile int g_trace_decay = 4;
 volatile bool g_remanence_changed = true;
+volatile float g_zoom_factor = 1.0f;
+volatile bool g_zoom_changed = false;
 
 // Lien vers la variable pour le heartbeat SPI
 extern volatile unsigned long g_last_spi_packet_time;
 
 // Variable partagée globale (définie ici)
 QueueHandle_t points_queue;
+QueueHandle_t raw_points_queue;
 
 // Variables pour le smoothing des entrées ADC et le suivi des changements
 static int last_decay_adc = 0;
 static float smoothed_decay_adc = 0;
+static int last_zoom_adc = 0;
+static float smoothed_zoom_adc = 0;
 
 // Flag pour savoir si le SPI a été initialisé correctement (vérité externe)
 extern bool g_spi_initialized_ok;
@@ -106,7 +111,17 @@ static void draw_catmull_rom_segment(uint16_t *framebuffer, PlotterPacket p0, Pl
             continue;  // Pixel hors écran, passer au suivant
         }
         
-        // Pixel valide, écriture sécurisée
+        // Validation du masque circulaire (même logique que precompute_circle_mask)
+        int center = SCREEN_WIDTH / 2;  // Centre: 360
+        int radius = center - 2;        // Rayon: 358 (2 pixels de marge pour éviter les pixels persistants)
+        int dx_from_center = ix - center;
+        int dy_from_center = iy - center;
+        int radius_sq = dx_from_center * dx_from_center + dy_from_center * dy_from_center;
+        if (radius_sq > radius * radius) {
+            continue;  // Pixel hors du cercle, passer au suivant
+        }
+        
+        // Pixel valide et dans le cercle, écriture sécurisée
         long screen_index = iy * SCREEN_WIDTH + ix;
         life_buffer[screen_index] = 255;
         framebuffer[screen_index] = render_palette[255];
@@ -174,7 +189,36 @@ static void control_task(void *pvParameters) {
         float norm_adc = smoothed_decay_adc / 4095.0f;  // Normaliser 0-1
         g_remanence_duration_ms = REMANENCE_MS_MIN * exp(norm_adc * REMANENCE_LOG_RATIO);
 
+        // --- LECTURE DU POTENTIOMÈTRE ZOOM (A0) ---
+        int raw_zoom_adc = analogRead(A0);
+        if (abs(raw_zoom_adc - last_zoom_adc) > ADC_DEADBAND) {
+            smoothed_zoom_adc = SMOOTH_FACTOR * raw_zoom_adc + (1 - SMOOTH_FACTOR) * smoothed_zoom_adc;
+            last_zoom_adc = raw_zoom_adc;
+
+            // Mapper la valeur ADC (0-4095) sur une plage de zoom de 0.5x à 1.5x
+            float norm_zoom_adc = smoothed_zoom_adc / 4095.0f;
+            const float ZOOM_MIN = 0.5f;
+            const float ZOOM_MAX = 1.5f;
+            g_zoom_factor = ZOOM_MIN + norm_zoom_adc * (ZOOM_MAX - ZOOM_MIN);
+            g_zoom_changed = true; // Optionnel, si une autre tâche doit réagir
+        }
+
         vTaskDelay(pdMS_TO_TICKS(10)); // Petite pause pour ne pas saturer le CPU
+    }
+}
+
+static void zoom_task(void *pvParameters) {
+    PlotterPacket p;
+    const int16_t CENTER = SCREEN_WIDTH / 2;
+
+    for (;;) {
+        if (xQueueReceive(raw_points_queue, &p, portMAX_DELAY)) {
+            if (g_zoom_factor != 1.0f) {
+                p.x = (uint16_t)(((int16_t)p.x - CENTER) * g_zoom_factor + CENTER);
+                p.y = (uint16_t)(((int16_t)p.y - CENTER) * g_zoom_factor + CENTER);
+            }
+            xQueueSend(points_queue, &p, 0);
+        }
     }
 }
 
@@ -249,6 +293,7 @@ static void render_task(void *pvParameters) {
 void start_render_and_control_tasks(TaskHandle_t spiHandle) {
     // Le handle SPI n'est plus utilisé car la tâche SPI tourne en permanence
     xTaskCreatePinnedToCore(control_task, "Controls", 4096, NULL, 0, NULL, 0);
+    xTaskCreatePinnedToCore(zoom_task, "ZoomTask", 4096, NULL, 1, NULL, 0);
     xTaskCreatePinnedToCore(render_task, "Render", 16384, NULL, 1, NULL, 1);
 }
 
@@ -278,4 +323,6 @@ void setup_renderer_and_controls() {
     // Création de la file d'attente pour les points à afficher
     points_queue = xQueueCreate(1024, sizeof(PlotterPacket));
     if (points_queue == NULL) { while(1); } // Création de la queue échouée, bloquer le système
+    raw_points_queue = xQueueCreate(1024, sizeof(PlotterPacket));
+    if (raw_points_queue == NULL) { while(1); } // Création de la queue échouée, bloquer le système
 }
